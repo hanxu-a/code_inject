@@ -1,0 +1,94 @@
+#include <stdio.h>
+#include <windows.h>
+#include <string.h>
+#include <tlhelp32.h>
+
+
+BOOL LoadDll(DWORD dwProcessID,char *szDllPathName) 
+{
+	BOOL bRet;
+	HANDLE hProcess;
+	HANDLE hThread;
+	DWORD dwLength;
+	DWORD dwLoadAddr;
+	LPVOID lpAllocAddr;
+	DWORD dwThreadID;
+	HMODULE hMoudle;
+
+	bRet = 0;
+	dwLoadAddr = 0;
+	hProcess = 0;
+
+	//1. 获取目标进程句柄，注意调试权限
+	hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwProcessID);
+	if (hProcess == NULL) 
+	{
+		printf("OpenProcess Error!\n");
+		return FALSE;
+	}
+
+	//2. 计算DLL路径名长度，并且要加上0结尾的长度
+	dwLength = strlen(szDllPathName) + 1;
+
+	//3. 在目标进程分配内存
+	lpAllocAddr = VirtualAllocEx(hProcess, NULL, dwLength, MEM_COMMIT, PAGE_READWRITE);
+	if (lpAllocAddr == NULL) 
+	{
+		printf("VirtualAllocEx Error!\n");
+		CloseHandle(hProcess);
+		return FALSE;
+	}
+
+	//4. 拷贝DLL路径名到目标进程的内存
+	bRet = WriteProcessMemory(hProcess, lpAllocAddr, szDllPathName, dwLength, NULL);
+	if (bRet == NULL) 
+	{
+		printf("WriteProcessMemory Error!\n");
+		CloseHandle(hProcess);
+		return FALSE;
+	}
+
+	//5. 获取模块地址，因为Kernel32.dll在所有进程中都一样
+	hMoudle = GetModuleHandle("Kernel32.dll");
+	if (!hMoudle) 
+	{
+		printf("GetModuleHandle Error!\n");
+		CloseHandle(hProcess);
+		CloseHandle(hMoudle);
+		return FALSE;
+	}
+
+	//6. 获取LoadLibraryA 函数地址
+	dwLoadAddr = (DWORD)GetProcAddress(hMoudle, "LoadLibraryA");
+	if (!dwLoadAddr) 
+	{
+		printf("GetProcAddress Error!\n");
+		CloseHandle(hProcess);
+		CloseHandle(hMoudle);
+		return FALSE;
+	}
+
+	//7. 创建远程线程，加载DLL
+	hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)dwLoadAddr, lpAllocAddr, 0, NULL);
+	printf("now tid is %d", GetCurrentThreadId());
+	if (!hThread) 
+	{
+		printf("CreateRemoteThread Error!\n");
+		CloseHandle(hProcess);
+		CloseHandle(hMoudle);
+		return FALSE;
+	}
+
+	//8. 关闭进程句柄
+	CloseHandle(hProcess);
+	printf("Inject Success!\n");
+	return TRUE;
+}
+
+
+int main() 
+{
+	LoadDll(13020,"C:\\Users\\Han Xu\\Desktop\\Dll2.dll");
+
+	return 0;
+}
